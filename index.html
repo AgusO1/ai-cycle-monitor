@@ -511,14 +511,42 @@ function computeCycleScore(stockData) {
 }
 
 // ============================================================
-// ELECTRICITY — vía Netlify Function (proxy seguro, multi-fuente)
+// ELECTRICITY — directo a APIs públicas (sin proxy)
+// Cadena: Energy-Charts → REE (España) → corsproxy.io
 // ============================================================
 async function fetchElectricity() {
+  const today     = new Date().toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+
   const countries = [
-    { code: 'de', name: '🇩🇪 Alemania' },
-    { code: 'fr', name: '🇫🇷 Francia'  },
-    { code: 'es', name: '🇪🇸 España'   },
-    { code: 'nl', name: '🇳🇱 Holanda'  },
+    {
+      code: 'de', name: '🇩🇪 Alemania',
+      urls: [
+        { u: `https://api.energy-charts.info/price?bzn=de&start=${yesterday}&end=${today}`, fmt: 'ec' },
+        { u: `https://api.energy-charts.info/price?bzn=DE-LU&start=${yesterday}&end=${today}`, fmt: 'ec' },
+      ]
+    },
+    {
+      code: 'fr', name: '🇫🇷 Francia',
+      urls: [
+        { u: `https://api.energy-charts.info/price?bzn=fr&start=${yesterday}&end=${today}`, fmt: 'ec' },
+        { u: `https://api.energy-charts.info/price?bzn=FR&start=${yesterday}&end=${today}`, fmt: 'ec' },
+      ]
+    },
+    {
+      code: 'es', name: '🇪🇸 España',
+      urls: [
+        { u: `https://api.energy-charts.info/price?bzn=es&start=${yesterday}&end=${today}`, fmt: 'ec' },
+        { u: `https://apidatos.ree.es/es/datos/mercados/precios-mercados-tiempo-real?start_date=${yesterday}T00:00&end_date=${today}T23:59&time_trunc=hour`, fmt: 'ree' },
+      ]
+    },
+    {
+      code: 'nl', name: '🇳🇱 Holanda',
+      urls: [
+        { u: `https://api.energy-charts.info/price?bzn=nl&start=${yesterday}&end=${today}`, fmt: 'ec' },
+        { u: `https://api.energy-charts.info/price?bzn=NL&start=${yesterday}&end=${today}`, fmt: 'ec' },
+      ]
+    },
   ];
 
   const container = document.getElementById('elecCards');
@@ -528,52 +556,65 @@ async function fetchElectricity() {
     `<div class="card"><div class="card-lbl"><span class="live-dot warn-dot"></span>Cargando...</div><div class="card-val muted"><span class="spin"></span></div></div>`
   ).join('');
 
-  const results = await Promise.allSettled(
-    countries.map(c =>
-      fetch(`/.netlify/functions/data?type=electricity&country=${c.code}`, { signal: AbortSignal.timeout(12000) })
-        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-        .then(d => ({ ...c, ...d, ok: true }))
-    )
-  );
+  async function fetchCountry(c) {
+    for (const { u, fmt } of c.urls) {
+      try {
+        const r = await fetch(u, {
+          headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(9000)
+        });
+        if (!r.ok) continue;
+        const d = await r.json();
 
-  let html = '';
-  let liveCount = 0;
+        if (fmt === 'ec' && Array.isArray(d?.price) && d.price.length > 0) {
+          return { prices: d.price, source: 'Energy-Charts · Fraunhofer ISE' };
+        }
+        if (fmt === 'ree') {
+          const vals = d?.included?.[0]?.attributes?.values;
+          if (vals?.length) return { prices: vals.map(v => v.value), source: 'REE · Red Eléctrica España' };
+        }
+      } catch(e) { console.warn(c.name, u, e.message); }
+    }
+    return null;
+  }
+
+  const results = await Promise.allSettled(countries.map(c => fetchCountry(c)));
+
+  let html = '', liveCount = 0;
   const sources = new Set();
 
   results.forEach((r, i) => {
     const c = countries[i];
-    if (r.status === 'fulfilled' && r.value.ok && r.value.prices?.length) {
-      const v = r.value;
-      // precios vienen en €/MWh → convertir a c€/kWh
-      const pricesNorm = v.prices.map(p => p / 10);
-      const latest  = pricesNorm[pricesNorm.length - 1];
-      const avg     = pricesNorm.reduce((a,b)=>a+b,0) / pricesNorm.length;
+    const v = r.status === 'fulfilled' ? r.value : null;
+    if (v?.prices?.length) {
+      const norm    = v.prices.map(p => p / 10);
+      const latest  = norm[norm.length - 1];
+      const avg     = norm.reduce((a, b) => a + b, 0) / norm.length;
       const diff    = latest - avg;
       const diffPct = avg !== 0 ? (diff / avg * 100) : 0;
-      const colorClass = latest > avg*1.2 ? 'down' : latest < avg*0.8 ? 'up' : 'warn';
-      const maxP = Math.max(...pricesNorm) || 1;
-      const sparkBars = pricesNorm.slice(-12).map(p => {
-        const h = Math.max(4, (p / maxP) * 28);
+      const cls     = latest > avg*1.2 ? 'down' : latest < avg*0.8 ? 'up' : 'warn';
+      const maxP    = Math.max(...norm) || 1;
+      const spark   = norm.slice(-12).map(p => {
+        const h   = Math.max(4, (p / maxP) * 28);
         const col = p > avg * 1.2 ? 'var(--red)' : 'var(--green)';
         return `<div class="spark-bar" style="height:${h}px;background:${col}"></div>`;
       }).join('');
-      sources.add(v.source || 'API');
+      sources.add(v.source);
       liveCount++;
       html += `
         <div class="card ${diff>0?'accent-yellow':'accent-green'}">
           <div class="card-lbl"><span class="live-dot"></span>${c.name}</div>
-          <div class="card-val ${colorClass}">${fmt(latest,2)}<span style="font-size:13px;font-weight:400;color:var(--muted)"> c€/kWh</span></div>
+          <div class="card-val ${cls}">${fmt(latest,2)}<span style="font-size:13px;font-weight:400;color:var(--muted)"> c€/kWh</span></div>
           <div class="card-delta ${diff>0?'down':'up'}">${diff>0?'▲':'▼'} ${fmt(Math.abs(diffPct),1)}% vs media hoy</div>
-          <div class="spark">${sparkBars}</div>
-          <div style="font-size:9px;color:var(--muted);margin-top:6px;font-family:'JetBrains Mono',monospace">${v.source||'—'}</div>
+          <div class="spark">${spark}</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:6px;font-family:'JetBrains Mono',monospace">${v.source}</div>
         </div>`;
     } else {
-      const errMsg = r.value?.error || r.reason?.message || 'Sin datos';
       html += `
         <div class="card">
           <div class="card-lbl"><span class="live-dot dead-dot"></span>${c.name}</div>
           <div class="card-val muted">N/D</div>
-          <div class="card-sub" style="font-size:10px">${errMsg}</div>
+          <div class="card-sub" style="font-size:10px">Fuentes no disponibles ahora</div>
         </div>`;
     }
   });
@@ -584,7 +625,7 @@ async function fetchElectricity() {
     badge.innerHTML = '⚠ Sin datos — todas las fuentes fallaron';
     badge.className = 'badge badge-err';
   } else if (liveCount < countries.length) {
-    badge.innerHTML = `⚡ Parcial · ${liveCount}/${countries.length} · ${[...sources].join(', ')}`;
+    badge.innerHTML = `⚡ Parcial · ${liveCount}/4 · ${[...sources].join(', ')}`;
     badge.className = 'badge badge-q';
   } else {
     badge.innerHTML = `<span class="live-dot"></span>En vivo · ${[...sources].join(' + ')}`;
@@ -593,62 +634,193 @@ async function fetchElectricity() {
 }
 
 // ============================================================
-// STOCKS — Yahoo Finance
+// API KEY — guardada en localStorage del navegador
+// ============================================================
+function getApiKey() {
+  return localStorage.getItem('anthropic_api_key') || '';
+}
+
+function saveApiKey(key) {
+  localStorage.setItem('anthropic_api_key', key.trim());
+}
+
+function promptApiKey() {
+  const existing = getApiKey();
+  const key = window.prompt(
+    '🔑 Introduce tu Anthropic API key (sk-ant-...):\n\nSe guardará solo en tu navegador y nunca se envía a ningún servidor externo.',
+    existing
+  );
+  if (key && key.startsWith('sk-ant-')) {
+    saveApiKey(key);
+    return key.trim();
+  } else if (key !== null) {
+    alert('La API key debe empezar por sk-ant-. Inténtalo de nuevo.');
+  }
+  return null;
+}
+
+// ============================================================
+// STOCKS — múltiples proxies con fallback
 // ============================================================
 async function fetchStocks() {
   const tbody = document.getElementById('stockBody');
   const badge = document.getElementById('stockBadge');
   tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:1.5rem;color:var(--muted)"><span class="spin"></span> Cargando...</td></tr>';
-  const tickers = STOCKS.map(s=>s.ticker).join(',');
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent`;
-  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-  try {
-    const res = await fetch(proxy, { signal: AbortSignal.timeout(10000) });
-    const wrapper = await res.json();
-    const data = JSON.parse(wrapper.contents);
-    const quotes = data?.quoteResponse?.result || [];
-    if (!quotes.length) throw new Error('No quotes');
-    const quoteMap = {};
-    quotes.forEach(q => quoteMap[q.symbol] = q);
-    const stockData = [];
-    let html = '';
-    STOCKS.forEach(s => {
-      const q = quoteMap[s.ticker];
-      if (!q) { html += `<tr><td class="mono">${s.ticker}</td><td>${s.name}</td><td colspan="3" style="color:var(--muted);text-align:center">N/D</td></tr>`; return; }
-      const price = q.regularMarketPrice;
-      const changePct = q.regularMarketChangePercent;
-      const currency = q.currency || 'USD';
-      stockData.push({ ticker: s.ticker, change: changePct });
-      const chClass = changePct >= 0 ? 'up' : 'down';
-      const chSign  = changePct >= 0 ? '▲' : '▼';
-      let signal = '→ Neutral', sigClass = 'muted';
-      if (changePct > 3)       { signal = '🚀 Fuerte subida'; sigClass = 'up'; }
-      else if (changePct > 1)  { signal = '↑ Subida';         sigClass = 'up'; }
-      else if (changePct > -1) { signal = '→ Neutral';        sigClass = 'muted'; }
-      else if (changePct > -3) { signal = '↓ Bajada';         sigClass = 'down'; }
-      else                     { signal = '⚠ Caída fuerte';   sigClass = 'down'; }
-      html += `<tr>
-        <td class="mono" style="color:var(--blue)">${s.ticker}</td>
-        <td><span style="font-weight:500">${s.name}</span><br><span style="font-size:10px;color:var(--muted)">${s.sector}</span></td>
-        <td class="mono" style="text-align:right">${fmt(price)} ${currency}</td>
-        <td class="mono ${chClass}" style="text-align:right">${chSign} ${fmt(Math.abs(changePct),2)}%</td>
-        <td style="text-align:right"><span class="${sigClass}" style="font-size:11px">${signal}</span></td>
-      </tr>`;
-    });
-    tbody.innerHTML = html;
-    badge.innerHTML = '<span class="live-dot"></span>Yahoo Finance · Tiempo real';
-    badge.className = 'badge badge-live';
-    return stockData;
-  } catch(e) {
-    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:1rem;color:var(--muted)">No disponible. <a href="https://finance.yahoo.com" target="_blank" style="color:var(--blue)">Ver en Yahoo →</a></td></tr>`;
-    badge.innerHTML = '⚠ Sin datos'; badge.className = 'badge badge-err';
-    return [];
+
+  const tickers = STOCKS.map(s => s.ticker).join(',');
+  const yahooUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent`;
+
+  // Intentar múltiples proxies
+  const proxies = [
+    `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`,
+    `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yahooUrl)}`,
+  ];
+
+  for (const proxy of proxies) {
+    try {
+      const res = await fetch(proxy, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) continue;
+
+      let quotes = [];
+      const text = await res.text();
+
+      // allorigins devuelve { contents: "..." }
+      try {
+        const wrapper = JSON.parse(text);
+        const inner = typeof wrapper.contents === 'string' ? JSON.parse(wrapper.contents) : wrapper;
+        quotes = inner?.quoteResponse?.result || [];
+      } catch {
+        // corsproxy devuelve directamente el JSON de Yahoo
+        try {
+          const direct = JSON.parse(text);
+          quotes = direct?.quoteResponse?.result || [];
+        } catch { continue; }
+      }
+
+      if (!quotes.length) continue;
+
+      const quoteMap = {};
+      quotes.forEach(q => quoteMap[q.symbol] = q);
+      const stockData = [];
+      let html = '';
+
+      STOCKS.forEach(s => {
+        const q = quoteMap[s.ticker];
+        if (!q) { html += `<tr><td class="mono">${s.ticker}</td><td>${s.name}</td><td colspan="3" style="color:var(--muted);text-align:center">N/D</td></tr>`; return; }
+        const price = q.regularMarketPrice;
+        const changePct = q.regularMarketChangePercent;
+        const currency = q.currency || 'USD';
+        stockData.push({ ticker: s.ticker, change: changePct });
+        const chClass = changePct >= 0 ? 'up' : 'down';
+        const chSign  = changePct >= 0 ? '▲' : '▼';
+        let signal = '→ Neutral', sigClass = 'muted';
+        if (changePct > 3)       { signal = '🚀 Fuerte subida'; sigClass = 'up'; }
+        else if (changePct > 1)  { signal = '↑ Subida';         sigClass = 'up'; }
+        else if (changePct > -1) { signal = '→ Neutral';        sigClass = 'muted'; }
+        else if (changePct > -3) { signal = '↓ Bajada';         sigClass = 'down'; }
+        else                     { signal = '⚠ Caída fuerte';   sigClass = 'down'; }
+        html += `<tr>
+          <td class="mono" style="color:var(--blue)">${s.ticker}</td>
+          <td><span style="font-weight:500">${s.name}</span><br><span style="font-size:10px;color:var(--muted)">${s.sector}</span></td>
+          <td class="mono" style="text-align:right">${fmt(price)} ${currency}</td>
+          <td class="mono ${chClass}" style="text-align:right">${chSign} ${fmt(Math.abs(changePct),2)}%</td>
+          <td style="text-align:right"><span class="${sigClass}" style="font-size:11px">${signal}</span></td>
+        </tr>`;
+      });
+
+      tbody.innerHTML = html;
+      badge.innerHTML = '<span class="live-dot"></span>Yahoo Finance · Tiempo real';
+      badge.className = 'badge badge-live';
+      return stockData;
+
+    } catch(e) {
+      console.warn('Stock proxy failed:', proxy, e.message);
+    }
   }
+
+  // Todos los proxies fallaron
+  tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:1rem;color:var(--muted)">No disponible ahora. <a href="https://finance.yahoo.com" target="_blank" style="color:var(--blue)">Ver en Yahoo →</a></td></tr>`;
+  badge.innerHTML = '⚠ Sin datos'; badge.className = 'badge badge-err';
+  return [];
 }
 
 // ============================================================
-// CLAUDE API — vía Netlify Function (API key segura en servidor)
+// CLAUDE API — directo desde el navegador con API key local
 // ============================================================
+function renderGPU(g) {
+  const gpuItems = [
+    { label: 'B200 SXM5 192GB', data: g.b200, color: 'var(--green)' },
+    { label: 'H200 SXM5 141GB', data: g.h200, color: 'var(--blue)' },
+    { label: 'H100 SXM5  80GB', data: g.h100, color: 'var(--yellow)' },
+    { label: 'A100 SXM4  80GB', data: g.a100, color: 'var(--muted)' },
+  ];
+  return gpuItems.map(item => `
+    <div class="gpu-ai-card">
+      <span class="gpu-ai-name">${item.label}</span>
+      <div style="text-align:right">
+        <div class="gpu-ai-price" style="color:${item.color}">
+          ${item.data?.price != null ? '$' + Number(item.data.price).toFixed(2) + '/hr' : 'N/D'}
+        </div>
+        <div class="gpu-ai-trend">${item.data?.trend || '—'}</div>
+      </div>
+    </div>`).join('') +
+    `<div style="font-size:9px;color:var(--muted);margin-top:6px;font-family:'JetBrains Mono',monospace">${g.source||'—'} · ${g.date||'—'}</div>`;
+}
+
+function renderDC(dc) {
+  return `
+    <div class="dc-metric"><div class="dc-metric-label">Vacancia N. Virginia</div>
+    <div class="dc-metric-val ${dc.vacancy_nova&&dc.vacancy_nova!=='N/D'?'up':'muted'}">${dc.vacancy_nova||'N/D'}</div></div>
+    <div class="dc-metric"><div class="dc-metric-label">En construcción (EEUU)</div>
+    <div class="dc-metric-val warn">${dc.under_construction_mw!=null?dc.under_construction_mw.toLocaleString()+' MW':'N/D'}</div></div>
+    <div class="dc-metric"><div class="dc-metric-label">Absorción trimestral</div>
+    <div class="dc-metric-val neu">${dc.absorption_q||'N/D'}</div></div>
+    <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:'JetBrains Mono',monospace">${dc.source||'—'} · ${dc.date||'—'}</div>`;
+}
+
+function renderPJM(pjm) {
+  return `
+    <div class="pjm-stat"><span class="pjm-stat-label">Precio capacidad DOM</span><span class="pjm-stat-val warn">${pjm.dom_capacity_price||'N/D'}</span></div>
+    <div class="pjm-stat"><span class="pjm-stat-label">Capacidad disponible</span><span class="pjm-stat-val ${pjm.available_capacity_gw?'up':'muted'}">${pjm.available_capacity_gw!=null?pjm.available_capacity_gw+' GW':'N/D'}</span></div>
+    <div class="pjm-stat"><span class="pjm-stat-label">Nueva capacidad ETA</span><span class="pjm-stat-val down">${pjm.new_capacity_eta||'N/D'}</span></div>
+    <div class="pjm-stat"><span class="pjm-stat-label">Previsión demanda</span><span class="pjm-stat-val neu">${pjm.load_forecast_gw!=null?pjm.load_forecast_gw+' GW':'N/D'}</span></div>
+    <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:'JetBrains Mono',monospace">${pjm.source||'—'} · ${pjm.date||'—'}</div>`;
+}
+
+function showStaticFallback(reason) {
+  const gpuDiv = document.getElementById('gpuAiContent');
+  const dcDiv  = document.getElementById('dcAiContent');
+  const pjmDiv = document.getElementById('pjmAiContent');
+  const statusBar = document.getElementById('aiStatusBar');
+  const badge = document.getElementById('aiBadge');
+
+  const fallbackGPU = { b200:{price:8.40,trend:'+demanda alta'}, h200:{price:5.82,trend:'→ estable'}, h100:{price:4.06,trend:'↓ -18% vs pico'}, a100:{price:2.21,trend:'↓ legacy'}, source:'Datos de referencia Jun 2026', date:'Jun 2026' };
+  gpuDiv.innerHTML = renderGPU(fallbackGPU) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
+  dcDiv.innerHTML  = renderDC({ vacancy_nova:'~1-2%', under_construction_mw:5000, absorption_q:'Récord Q1 2026', source:'CBRE referencia', date:'Q1 2026' }) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
+  pjmDiv.innerHTML = renderPJM({ dom_capacity_price:'+833% vs 2024', available_capacity_gw:null, new_capacity_eta:'2027+', load_forecast_gw:null, source:'PJM referencia', date:'2026' }) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
+
+  statusBar.innerHTML = `
+    <div class="ai-status-icon">🔑</div>
+    <div style="flex:1">
+      <div class="ai-status-text" style="color:var(--yellow)">${reason}</div>
+      <div class="ai-timestamp">Haz clic en "Configurar API Key" para activar datos en tiempo real</div>
+    </div>
+    <button onclick="setupApiKey()" style="padding:6px 12px;font-size:11px;cursor:pointer;border-radius:6px;border:1px solid var(--purple);background:rgba(168,85,247,0.1);color:var(--purple);font-family:'JetBrains Mono',monospace;white-space:nowrap">🔑 Configurar API Key</button>`;
+  statusBar.style.borderColor = 'rgba(255,184,0,0.3)';
+  statusBar.style.background  = 'rgba(255,184,0,0.04)';
+  badge.innerHTML = '⚠ Sin API key';
+  badge.className = 'badge badge-q';
+}
+
+async function setupApiKey() {
+  const key = promptApiKey();
+  if (key) {
+    showToast('✓ API key guardada — actualizando datos...');
+    await fetchAIData();
+  }
+}
+
 async function fetchAIData() {
   const statusBar = document.getElementById('aiStatusBar');
   const aiTs      = document.getElementById('aiTimestamp');
@@ -657,92 +829,68 @@ async function fetchAIData() {
   const dcDiv     = document.getElementById('dcAiContent');
   const pjmDiv    = document.getElementById('pjmAiContent');
 
-  try {
-    aiTs.textContent = 'Claude buscando datos en tiempo real...';
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    showStaticFallback('API key no configurada — datos de referencia estáticos');
+    return;
+  }
 
-    const res = await fetch('/.netlify/functions/data?type=ai', {
-      signal: AbortSignal.timeout(50000), // búsqueda web necesita tiempo
+  try {
+    aiTs && (aiTs.textContent = 'Claude buscando datos en tiempo real...');
+    statusBar.innerHTML = `
+      <div class="ai-status-icon">🤖</div>
+      <div><div class="ai-status-text"><strong>Claude</strong> buscando datos actualizados...</div>
+      <div class="ai-timestamp" id="aiTimestamp">Conectando con Anthropic API...</div></div>
+      <span class="spin spin-purple"></span>`;
+
+    const today = new Date().toLocaleDateString('es-ES', { day:'2-digit', month:'long', year:'numeric' });
+    const prompt = `Hoy es ${today}. Devuelve SOLO un objeto JSON válido sin texto adicional ni markdown:
+{"gpu":{"b200":{"price":null,"trend":""},"h200":{"price":null,"trend":""},"h100":{"price":null,"trend":""},"a100":{"price":null,"trend":""},"source":"","date":""},"datacenter":{"vacancy_nova":"","under_construction_mw":null,"absorption_q":"","source":"","date":""},"pjm":{"dom_capacity_price":"","available_capacity_gw":null,"new_capacity_eta":"","load_forecast_gw":null,"source":"","date":""}}
+Busca en spheron.network (GPU $/hora), cbre.com o datacentermap.com (data centers Virginia), pjm.com (capacidad DOM zone). Rellena todos los campos. Solo JSON.`;
+
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(55000),
     });
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'HTTP ' + res.status);
+    if (res.status === 401) {
+      localStorage.removeItem('anthropic_api_key');
+      showStaticFallback('API key inválida — introduce una key correcta');
+      return;
     }
 
-    const parsed = await res.json();
+    if (!res.ok) throw new Error('Anthropic API ' + res.status);
 
-    // ---- GPU ----
-    const g = parsed.gpu || {};
-    const gpuItems = [
-      { label: 'B200 SXM5 192GB', data: g.b200, color: 'var(--green)' },
-      { label: 'H200 SXM5 141GB', data: g.h200, color: 'var(--blue)' },
-      { label: 'H100 SXM5  80GB', data: g.h100, color: 'var(--yellow)' },
-      { label: 'A100 SXM4  80GB', data: g.a100, color: 'var(--muted)' },
-    ];
-    gpuDiv.innerHTML = gpuItems.map(item => `
-      <div class="gpu-ai-card">
-        <span class="gpu-ai-name">${item.label}</span>
-        <div style="text-align:right">
-          <div class="gpu-ai-price" style="color:${item.color}">
-            ${item.data?.price != null ? '$' + Number(item.data.price).toFixed(2) + '/hr' : 'N/D'}
-          </div>
-          <div class="gpu-ai-trend">${item.data?.trend || '—'}</div>
-        </div>
-      </div>`).join('') +
-      `<div style="font-size:9px;color:var(--muted);margin-top:6px;font-family:'JetBrains Mono',monospace">
-        ${g.source||'—'} · ${g.date||'—'}
-      </div>`;
+    const data = await res.json();
+    const fullText = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const cleaned  = fullText.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON en respuesta');
+    const parsed = JSON.parse(jsonMatch[0]);
 
-    // ---- Data Center ----
-    const dc = parsed.datacenter || {};
-    dcDiv.innerHTML = `
-      <div class="dc-metric">
-        <div class="dc-metric-label">Vacancia N. Virginia</div>
-        <div class="dc-metric-val ${dc.vacancy_nova && dc.vacancy_nova!=='N/D'?'up':'muted'}">${dc.vacancy_nova||'N/D'}</div>
-      </div>
-      <div class="dc-metric">
-        <div class="dc-metric-label">En construcción (EEUU)</div>
-        <div class="dc-metric-val warn">${dc.under_construction_mw!=null?dc.under_construction_mw.toLocaleString()+' MW':'N/D'}</div>
-      </div>
-      <div class="dc-metric">
-        <div class="dc-metric-label">Absorción trimestral</div>
-        <div class="dc-metric-val neu">${dc.absorption_q||'N/D'}</div>
-      </div>
-      <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:'JetBrains Mono',monospace">
-        ${dc.source||'—'} · ${dc.date||'—'}
-      </div>`;
+    gpuDiv.innerHTML = renderGPU(parsed.gpu || {});
+    dcDiv.innerHTML  = renderDC(parsed.datacenter || {});
+    pjmDiv.innerHTML = renderPJM(parsed.pjm || {});
 
-    // ---- PJM ----
-    const pjm = parsed.pjm || {};
-    pjmDiv.innerHTML = `
-      <div class="pjm-stat">
-        <span class="pjm-stat-label">Precio capacidad DOM</span>
-        <span class="pjm-stat-val warn">${pjm.dom_capacity_price||'N/D'}</span>
-      </div>
-      <div class="pjm-stat">
-        <span class="pjm-stat-label">Capacidad disponible</span>
-        <span class="pjm-stat-val ${pjm.available_capacity_gw?'up':'muted'}">${pjm.available_capacity_gw!=null?pjm.available_capacity_gw+' GW':'N/D'}</span>
-      </div>
-      <div class="pjm-stat">
-        <span class="pjm-stat-label">Nueva capacidad ETA</span>
-        <span class="pjm-stat-val down">${pjm.new_capacity_eta||'N/D'}</span>
-      </div>
-      <div class="pjm-stat">
-        <span class="pjm-stat-label">Previsión demanda</span>
-        <span class="pjm-stat-val neu">${pjm.load_forecast_gw!=null?pjm.load_forecast_gw+' GW':'N/D'}</span>
-      </div>
-      <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:'JetBrains Mono',monospace">
-        ${pjm.source||'—'} · ${pjm.date||'—'}
-      </div>`;
-
-    // ---- Status ----
     const now = new Date().toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' });
     statusBar.innerHTML = `
       <div class="ai-status-icon">✅</div>
       <div>
         <div class="ai-status-text"><strong>Claude</strong> actualizó los datos con búsqueda web en tiempo real</div>
         <div class="ai-timestamp">Última búsqueda: ${now} · Spheron, CBRE, PJM</div>
-      </div>`;
+      </div>
+      <button onclick="setupApiKey()" style="padding:4px 10px;font-size:10px;cursor:pointer;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);font-family:'JetBrains Mono',monospace">⚙ Key</button>`;
     statusBar.style.borderColor = 'rgba(0,212,138,0.3)';
     statusBar.style.background  = 'rgba(0,212,138,0.04)';
     badge.innerHTML = '<span class="live-dot"></span>Claude · Actualizado';
@@ -751,45 +899,7 @@ async function fetchAIData() {
 
   } catch(err) {
     console.error('AI fetch error:', err);
-
-    // Fallback estático
-    const fallbackGPU = [
-      { label:'B200 SXM5 192GB', price:8.40, trend:'+demanda alta', color:'var(--green)' },
-      { label:'H200 SXM5 141GB', price:5.82, trend:'→ estable',     color:'var(--blue)' },
-      { label:'H100 SXM5  80GB', price:4.06, trend:'↓ -18% vs pico',color:'var(--yellow)' },
-      { label:'A100 SXM4  80GB', price:2.21, trend:'↓ legacy',      color:'var(--muted)' },
-    ];
-    gpuDiv.innerHTML = fallbackGPU.map(g => `
-      <div class="gpu-ai-card">
-        <span class="gpu-ai-name">${g.label}</span>
-        <div style="text-align:right">
-          <div class="gpu-ai-price" style="color:${g.color}">$${g.price.toFixed(2)}/hr</div>
-          <div class="gpu-ai-trend">${g.trend}</div>
-        </div>
-      </div>`).join('') +
-      `<div style="font-size:9px;color:var(--red);margin-top:6px;font-family:'JetBrains Mono',monospace">⚠ Datos estáticos — configura ANTHROPIC_API_KEY en Netlify</div>`;
-
-    dcDiv.innerHTML = `
-      <div class="dc-metric"><div class="dc-metric-label">Vacancia N. Virginia</div><div class="dc-metric-val up">~1-2%</div></div>
-      <div class="dc-metric"><div class="dc-metric-label">En construcción</div><div class="dc-metric-val warn">~5,000+ MW</div></div>
-      <div class="dc-metric"><div class="dc-metric-label">Absorción Q1 2026</div><div class="dc-metric-val neu">Récord histórico</div></div>
-      <div style="font-size:9px;color:var(--red);margin-top:8px;font-family:'JetBrains Mono',monospace">⚠ Estático — configura API key</div>`;
-
-    pjmDiv.innerHTML = `
-      <div class="pjm-stat"><span class="pjm-stat-label">Precio capacidad DOM</span><span class="pjm-stat-val warn">+833% vs 2024</span></div>
-      <div class="pjm-stat"><span class="pjm-stat-label">Nueva capacidad ETA</span><span class="pjm-stat-val down">2027+</span></div>
-      <div style="font-size:9px;color:var(--red);margin-top:8px;font-family:'JetBrains Mono',monospace">⚠ Estático — configura API key</div>`;
-
-    statusBar.innerHTML = `
-      <div class="ai-status-icon">⚠️</div>
-      <div>
-        <div class="ai-status-text" style="color:var(--yellow)">Datos estáticos — Claude API no disponible</div>
-        <div class="ai-timestamp">${err.message}</div>
-      </div>`;
-    statusBar.style.borderColor = 'rgba(255,184,0,0.3)';
-    statusBar.style.background  = 'rgba(255,184,0,0.04)';
-    badge.innerHTML = '⚠ Datos estáticos';
-    badge.className = 'badge badge-q';
+    showStaticFallback('Error al conectar con Claude API: ' + err.message);
   }
 }
 
