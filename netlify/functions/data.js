@@ -23,12 +23,10 @@ exports.handler = async (event) => {
 
   const { type, country } = event.queryStringParameters || {};
 
-  // ── ELECTRICIDAD ──────────────────────────────────────────
   if (type === 'electricity') {
     const today     = new Date().toISOString().split('T')[0];
     const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
 
-    // Fuentes por país en orden de preferencia
     const sources = {
       de: [
         { url: `https://api.energy-charts.info/price?bzn=de&start=${yesterday}&end=${today}`, fmt: 'energy-charts' },
@@ -64,7 +62,6 @@ exports.handler = async (event) => {
 
         const data = await res.json();
 
-        // Energy-Charts format: { price: [...], unix_seconds: [...] }
         if (attempt.fmt === 'energy-charts' && Array.isArray(data?.price) && data.price.length > 0) {
           return {
             statusCode: 200, headers: cors,
@@ -75,7 +72,6 @@ exports.handler = async (event) => {
           };
         }
 
-        // REE format: { included: [{ attributes: { values: [...] } }] }
         if (attempt.fmt === 'ree') {
           const vals = data?.included?.[0]?.attributes?.values;
           if (vals?.length) {
@@ -100,7 +96,6 @@ exports.handler = async (event) => {
     };
   }
 
-  // ── CLAUDE API — GPU / DATA CENTER / PJM ─────────────────
   if (type === 'ai') {
     if (!ANTHROPIC_KEY) {
       return {
@@ -143,13 +138,11 @@ Rellena todos los campos buscando en: spheron.network (GPU $/hora spot), cbre.co
 
       const data = await res.json();
 
-      // Extraer todos los bloques de texto
       const fullText = (data.content || [])
         .filter(b => b.type === 'text')
         .map(b => b.text)
         .join('');
 
-      // Buscar el JSON en la respuesta — puede venir con o sin bloques ```
       const cleaned = fullText
         .replace(/```json\s*/gi, '')
         .replace(/```\s*/g, '')
