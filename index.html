@@ -751,6 +751,8 @@ function renderGPU(g) {
 }
 
 function renderDC(dc) {
+  const trendCol = dc.trend_mom && /↓|baj|desc|-/.test(dc.trend_mom.toLowerCase()) ? 'var(--red)'
+                 : dc.trend_mom && /↑|sub|+/.test(dc.trend_mom.toLowerCase()) ? 'var(--green)' : 'var(--muted)';
   return `
     <div class="dc-metric"><div class="dc-metric-label">Vacancia N. Virginia</div>
     <div class="dc-metric-val ${dc.vacancy_nova&&dc.vacancy_nova!=='N/D'?'up':'muted'}">${dc.vacancy_nova||'N/D'}</div></div>
@@ -758,6 +760,7 @@ function renderDC(dc) {
     <div class="dc-metric-val warn">${dc.under_construction_mw!=null?dc.under_construction_mw.toLocaleString()+' MW':'N/D'}</div></div>
     <div class="dc-metric"><div class="dc-metric-label">Absorción trimestral</div>
     <div class="dc-metric-val neu">${dc.absorption_q||'N/D'}</div></div>
+    ${dc.trend_mom ? `<div class="dc-metric"><div class="dc-metric-label">Tendencia mensual</div><div class="dc-metric-val" style="color:${trendCol};font-size:13px">${dc.trend_mom}</div></div>` : ''}
     <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:'JetBrains Mono',monospace">${dc.source||'—'} · ${dc.date||'—'}</div>`;
 }
 
@@ -779,7 +782,7 @@ function showStaticFallback(reason) {
 
   const fallbackGPU = { b200:{price:8.40,trend:'+demanda alta'}, h200:{price:5.82,trend:'→ estable'}, h100:{price:4.06,trend:'↓ -18% vs pico'}, a100:{price:2.21,trend:'↓ legacy'}, source:'Datos de referencia Jun 2026', date:'Jun 2026' };
   gpuDiv.innerHTML = renderGPU(fallbackGPU) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
-  dcDiv.innerHTML  = renderDC({ vacancy_nova:'~1-2%', under_construction_mw:5000, absorption_q:'Récord Q1 2026', source:'CBRE referencia', date:'Q1 2026' }) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
+  dcDiv.innerHTML  = renderDC({ vacancy_nova:'~1-2%', under_construction_mw:5000, absorption_q:'Récord Q1 2026', trend_mom:'N/D', source:'CBRE referencia', date:'Q1 2026' }) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
   pjmDiv.innerHTML = renderPJM({ dom_capacity_price:'+833% vs 2024', available_capacity_gw:null, new_capacity_eta:'2027+', load_forecast_gw:null, source:'PJM referencia', date:'2026' }) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
 
   statusBar.innerHTML = `
