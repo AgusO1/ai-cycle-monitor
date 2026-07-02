@@ -159,14 +159,16 @@ exports.handler = async (event) => {
 
     const prompt = `Hoy es ${today}. Busca datos actualizados y devuelve SOLO un objeto JSON válido, sin texto adicional, sin markdown, sin bloques de código:
 
-{"gpu":{"b200":{"price":null,"trend":""},"h200":{"price":null,"trend":""},"h100":{"price":null,"trend":""},"a100":{"price":null,"trend":""},"source":"","date":""},"datacenter":{"vacancy_nova":"","under_construction_mw":null,"absorption_q":"","source":"","date":""},"pjm":{"dom_capacity_price":"","available_capacity_gw":null,"new_capacity_eta":"","load_forecast_gw":null,"source":"","date":""},"cycle":{"energy_score":null,"energy_reason":"","compute_score":null,"compute_reason":"","demand_score":null,"demand_reason":""}}
+{"gpu":{"b200":{"price":null,"trend":""},"h200":{"price":null,"trend":""},"h100":{"price":null,"trend":""},"a100":{"price":null,"trend":""},"source":"","date":""},"datacenter":{"vacancy_nova":"","under_construction_mw":null,"absorption_q":"","trend_mom":"","source":"","date":""},"pjm":{"dom_capacity_price":"","available_capacity_gw":null,"new_capacity_eta":"","load_forecast_gw":null,"source":"","date":""},"cycle":{"energy_score":null,"energy_reason":"","compute_score":null,"compute_reason":"","demand_score":null,"demand_reason":""}}
 
 Rellena buscando en: spheron.network (GPU $/hora spot), cbre.com o datacentermap.com (data centers Northern Virginia), pjm.com (capacidad eléctrica zona DOM).
 
-Para el objeto "cycle", evalúa el ciclo de inversión en infraestructura de IA con tres scores de 0 a 100, donde 100 = máxima ESCASEZ (alcista para el ciclo, la demanda supera con creces la oferta) y 0 = máximo EXCESO (bajista, sobra capacidad):
-- energy_score: ¿La energía para data centers está escasa y cara (score alto) o sobra y está barata (score bajo)? Basa esto en el precio de capacidad de PJM Virginia y los precios spot eléctricos. energy_reason: una frase corta justificando.
-- compute_score: ¿Las GPUs están escasas/caras con listas de espera (alto) o sobra oferta y bajan precios (bajo)? Basa esto en el GPU pricing y disponibilidad. compute_reason: una frase corta.
-- demand_score: ¿La demanda de infraestructura acelera —capex creciente, data centers llenos, baja vacancia— (alto) o se enfría (bajo)? demand_reason: una frase corta.
+En el campo "trend" de cada GPU, indica la dirección del precio respecto al mes anterior (ej. "↓ -12% MoM", "↑ +5% MoM", "→ estable"). En "datacenter.trend_mom" indica cómo evoluciona la vacancia/absorción respecto al mes anterior.
+
+Para el objeto "cycle", evalúa el ciclo de inversión en infraestructura de IA con tres scores de 0 a 100, donde 100 = máxima ESCASEZ (alcista, la demanda supera la oferta) y 0 = máximo EXCESO (bajista, sobra capacidad):
+- energy_score: ¿La energía para data centers está escasa y cara (alto) o sobra y barata (bajo)? Basa esto en el precio de capacidad de PJM Virginia y los precios spot. energy_reason: frase corta.
+- compute_score: evalúa sobre todo la TENDENCIA del precio de GPUs respecto al mes anterior. Precios subiendo o estables con listas de espera = escasez (alto). Precios BAJANDO de forma sostenida = primeras señales de exceso de oferta = score más bajo. En compute_reason indica explícitamente la tendencia mensual, ej. "H100 -15% MoM, primeras señales de exceso".
+- demand_score: evalúa la TENDENCIA de la demanda de infraestructura respecto al mes anterior: capex, ocupación de data centers y vacancia. Mejorando/llenándose = alto. Vacancia subiendo o capex frenando = bajo. En demand_reason indica la dirección del cambio mensual.
 
 Si un valor es desconocido usa null o "N/D". Devuelve SOLO el JSON.`;
 
