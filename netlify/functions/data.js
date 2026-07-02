@@ -11,17 +11,6 @@ const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; AI-Cycle-Monitor/2.0)',
 };
 
-// Convierte el formato FMP al formato que espera el dashboard
-function normalizeFMP(arr) {
-  if (!Array.isArray(arr)) return [];
-  return arr.map(q => ({
-    symbol: q.symbol,
-    regularMarketPrice: q.price,
-    regularMarketChangePercent: q.changePercentage != null ? q.changePercentage : (q.changesPercentage != null ? q.changesPercentage : 0),
-    currency: 'USD',
-  }));
-}
-
 exports.handler = async (event) => {
   const cors = {
     'Access-Control-Allow-Origin': '*',
@@ -35,7 +24,7 @@ exports.handler = async (event) => {
 
   const { type, country } = event.queryStringParameters || {};
 
-  // ── ACCIONES — Financial Modeling Prep (fiable desde servidor) ──
+  // ── ACCIONES — Financial Modeling Prep (una llamada por símbolo, plan free) ──
   if (type === 'stocks') {
     const tickers = (event.queryStringParameters?.tickers || '').trim();
     if (!tickers) {
@@ -45,23 +34,37 @@ exports.handler = async (event) => {
       return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'FMP_API_KEY no configurada en Netlify → Environment variables' }) };
     }
 
-    try {
-      const url = `https://financialmodelingprep.com/stable/quote?symbol=${tickers}&apikey=${FMP_KEY}`;
-      const res = await fetch(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(12000) });
-      if (!res.ok) {
-        // El endpoint stable admite un símbolo por llamada en el plan free; probamos el batch legacy
-        const urlBatch = `https://financialmodelingprep.com/api/v3/quote/${tickers}?apikey=${FMP_KEY}`;
-        const res2 = await fetch(urlBatch, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(12000) });
-        if (!res2.ok) throw new Error('FMP HTTP ' + res2.status);
-        const arr2 = await res2.json();
-        return { statusCode: 200, headers: cors, body: JSON.stringify({ quotes: normalizeFMP(arr2), source: 'Financial Modeling Prep' }) };
+    const symbols = tickers.split(',').map(t => t.trim()).filter(Boolean);
+
+    // El plan free de FMP solo admite 1 símbolo por llamada → llamadas en paralelo
+    const results = await Promise.allSettled(
+      symbols.map(sym =>
+        fetch(`https://financialmodelingprep.com/stable/quote?symbol=${sym}&apikey=${FMP_KEY}`, {
+          headers: FETCH_HEADERS, signal: AbortSignal.timeout(9000),
+        })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(arr => Array.isArray(arr) && arr[0] ? arr[0] : null)
+      )
+    );
+
+    const quotes = [];
+    results.forEach(r => {
+      if (r.status === 'fulfilled' && r.value) {
+        const q = r.value;
+        quotes.push({
+          symbol: q.symbol,
+          regularMarketPrice: q.price,
+          regularMarketChangePercent: q.changePercentage != null ? q.changePercentage : 0,
+          currency: 'USD',
+        });
       }
-      const arr = await res.json();
-      return { statusCode: 200, headers: cors, body: JSON.stringify({ quotes: normalizeFMP(arr), source: 'Financial Modeling Prep' }) };
-    } catch (e) {
-      console.error('FMP fetch failed:', e.message);
-      return { statusCode: 503, headers: cors, body: JSON.stringify({ error: 'Sin datos de acciones: ' + e.message }) };
+    });
+
+    if (!quotes.length) {
+      return { statusCode: 503, headers: cors, body: JSON.stringify({ error: 'Sin datos de acciones' }) };
     }
+
+    return { statusCode: 200, headers: cors, body: JSON.stringify({ quotes, source: 'Financial Modeling Prep' }) };
   }
 
   // ── ELECTRICIDAD ──────────────────────────────────────────
