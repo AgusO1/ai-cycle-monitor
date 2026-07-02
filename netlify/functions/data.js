@@ -159,9 +159,16 @@ exports.handler = async (event) => {
 
     const prompt = `Hoy es ${today}. Busca datos actualizados y devuelve SOLO un objeto JSON válido, sin texto adicional, sin markdown, sin bloques de código:
 
-{"gpu":{"b200":{"price":null,"trend":""},"h200":{"price":null,"trend":""},"h100":{"price":null,"trend":""},"a100":{"price":null,"trend":""},"source":"","date":""},"datacenter":{"vacancy_nova":"","under_construction_mw":null,"absorption_q":"","source":"","date":""},"pjm":{"dom_capacity_price":"","available_capacity_gw":null,"new_capacity_eta":"","load_forecast_gw":null,"source":"","date":""}}
+{"gpu":{"b200":{"price":null,"trend":""},"h200":{"price":null,"trend":""},"h100":{"price":null,"trend":""},"a100":{"price":null,"trend":""},"source":"","date":""},"datacenter":{"vacancy_nova":"","under_construction_mw":null,"absorption_q":"","source":"","date":""},"pjm":{"dom_capacity_price":"","available_capacity_gw":null,"new_capacity_eta":"","load_forecast_gw":null,"source":"","date":""},"cycle":{"energy_score":null,"energy_reason":"","compute_score":null,"compute_reason":"","demand_score":null,"demand_reason":""}}
 
-Rellena todos los campos buscando en: spheron.network (GPU $/hora spot), cbre.com o datacentermap.com (data centers Northern Virginia), pjm.com (capacidad eléctrica zona DOM). Si un valor es desconocido usa null o "N/D". Devuelve SOLO el JSON.`;
+Rellena buscando en: spheron.network (GPU $/hora spot), cbre.com o datacentermap.com (data centers Northern Virginia), pjm.com (capacidad eléctrica zona DOM).
+
+Para el objeto "cycle", evalúa el ciclo de inversión en infraestructura de IA con tres scores de 0 a 100, donde 100 = máxima ESCASEZ (alcista para el ciclo, la demanda supera con creces la oferta) y 0 = máximo EXCESO (bajista, sobra capacidad):
+- energy_score: ¿La energía para data centers está escasa y cara (score alto) o sobra y está barata (score bajo)? Basa esto en el precio de capacidad de PJM Virginia y los precios spot eléctricos. energy_reason: una frase corta justificando.
+- compute_score: ¿Las GPUs están escasas/caras con listas de espera (alto) o sobra oferta y bajan precios (bajo)? Basa esto en el GPU pricing y disponibilidad. compute_reason: una frase corta.
+- demand_score: ¿La demanda de infraestructura acelera —capex creciente, data centers llenos, baja vacancia— (alto) o se enfría (bajo)? demand_reason: una frase corta.
+
+Si un valor es desconocido usa null o "N/D". Devuelve SOLO el JSON.`;
 
     try {
       const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -173,7 +180,7 @@ Rellena todos los campos buscando en: spheron.network (GPU $/hora spot), cbre.co
         },
         body: JSON.stringify({
           model: 'claude-haiku-4-5-20251001',
-          max_tokens: 1024,
+          max_tokens: 1536,
           tools: [{ type: 'web_search_20250305', name: 'web_search' }],
           messages: [{ role: 'user', content: prompt }],
         }),
