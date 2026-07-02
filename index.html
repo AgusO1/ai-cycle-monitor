@@ -125,6 +125,18 @@
   .energy-row.header { font-size: 9px; color: var(--muted); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.08em; padding-bottom: 8px; }
 
   /* AI DATA SECTION */
+  /* CYCLE BREAKDOWN */
+  .cycle-breakdown { margin-bottom: 1.5rem; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 0.9rem 1.1rem; }
+  .cb-title { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: 'JetBrains Mono', monospace; margin-bottom: 10px; }
+  .cb-row { display: grid; grid-template-columns: 70px 1fr 34px; grid-template-areas: "label bar val" "reason reason reason"; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .cb-row:last-child { border-bottom: none; }
+  .cb-label { grid-area: label; font-size: 11px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .cb-bar-wrap { grid-area: bar; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .cb-bar { height: 100%; border-radius: 3px; transition: width 0.8s ease; }
+  .cb-val { grid-area: val; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 13px; text-align: right; }
+  .cb-reason { grid-area: reason; font-size: 10px; color: var(--muted); line-height: 1.4; margin-top: 2px; }
+  .cb-scale { display: flex; justify-content: space-between; font-size: 9px; color: var(--muted); font-family: 'JetBrains Mono', monospace; margin-top: 8px; }
+
   .ai-status-bar {
     display: flex;
     align-items: center;
@@ -233,6 +245,18 @@
       <div class="sig-title up">Demanda — ACELERANDO</div>
       <div class="sig-text">Capex hyperscalers $725B en 2026. Agentic AI amplía demanda de inference continuo.</div>
     </div>
+  </div>
+</div>
+
+<!-- DESGLOSE DEL CYCLE SCORE -->
+<div class="cycle-breakdown">
+  <div class="cb-title">▲ Desglose del Cycle Score — evaluado por Claude</div>
+  <div id="cycleBreakdown">
+    <div style="font-size:11px;color:var(--muted);padding:0.5rem 0;text-align:center"><span class="spin spin-purple"></span> Esperando evaluación del ciclo...</div>
+  </div>
+  <div class="cb-scale">
+    <span>0 = Exceso de capacidad (bajista)</span>
+    <span>100 = Escasez (alcista)</span>
   </div>
 </div>
 
@@ -428,16 +452,18 @@
 // CONFIGURACIÓN
 // ============================================================
 const STOCKS = [
-  { ticker: 'NVDA',  name: 'Nvidia',          sector: 'Aceleradores IA' },
-  { ticker: 'AVGO',  name: 'Broadcom',        sector: 'Chips custom IA' },
-  { ticker: 'AMD',   name: 'AMD',             sector: 'Chips IA' },
-  { ticker: 'TSM',   name: 'TSMC',            sector: 'Fabricación chips' },
+  { ticker: 'NVDA',  name: 'Nvidia',          sector: 'IA/Chips' },
+  { ticker: 'ASML',  name: 'ASML Holding',    sector: 'Chips EUV' },
+  { ticker: 'AVGO',  name: 'Broadcom',        sector: 'IA/Chips' },
   { ticker: 'MU',    name: 'Micron',          sector: 'Memoria HBM' },
-  { ticker: 'ASML',  name: 'ASML Holding',    sector: 'Litografía EUV' },
-  { ticker: 'VRT',   name: 'Vertiv',          sector: 'Refrigeración DC' },
-  { ticker: 'GEV',   name: 'GE Vernova',      sector: 'Energía IA' },
   { ticker: 'ANET',  name: 'Arista Networks', sector: 'Redes IA' },
+  { ticker: 'GEV',   name: 'GE Vernova',      sector: 'Energía IA' },
+  { ticker: 'VRT',   name: 'Vertiv',          sector: 'Cooling DC' },
+  { ticker: 'IONQ',  name: 'IonQ',            sector: 'Cuántica' },
   { ticker: 'NBIS',  name: 'Nebius Group',    sector: 'Neocloud' },
+  { ticker: 'SAN',   name: 'Santander',       sector: 'Europa' },
+  { ticker: 'CCJ',   name: 'Cameco',          sector: 'Uranio' },
+  { ticker: 'DDOG',  name: 'Datadog',         sector: 'Observabilidad' },
 ];
 
 const BULL_SIGNALS = [
@@ -487,25 +513,81 @@ function getYesterday() { const d = new Date(); d.setDate(d.getDate()-1); return
 // ============================================================
 // CYCLE SCORE
 // ============================================================
-function computeCycleScore(stockData) {
-  let score = 72;
-  if (stockData && stockData.length > 0) {
-    const gains = stockData.filter(s => s.change > 0).length;
-    const pct = gains / stockData.length;
-    if (pct > 0.7) score += 5;
-    else if (pct < 0.4) score -= 8;
+// ============================================================
+// CYCLE SCORE — media ponderada de los bloques evaluados por Claude
+// Energía 35% · Cómputo 30% · Demanda 35% · (acciones NO entran)
+// 100 = escasez máxima (alcista) · 0 = exceso máximo (bajista)
+// ============================================================
+let lastCycleData = null;
+
+function computeCycleScore(cycle) {
+  // Guardar para poder recalcular sin re-buscar
+  if (cycle) lastCycleData = cycle;
+  const c = cycle || lastCycleData;
+
+  const scoreEl = document.getElementById('cycleScore');
+  const barEl   = document.getElementById('cycleBar');
+  const phaseEl = document.getElementById('cyclePhase');
+
+  // Si aún no hay datos del ciclo, mostrar estado a la espera
+  if (!c || (c.energy_score == null && c.compute_score == null && c.demand_score == null)) {
+    scoreEl.textContent = '—';
+    phaseEl.textContent = 'Esperando datos...';
+    phaseEl.style.color = 'var(--muted)';
+    return;
   }
-  score = Math.max(20, Math.min(95, score));
-  document.getElementById('cycleScore').textContent = score;
-  document.getElementById('cycleBar').style.width = score + '%';
+
+  // Pesos de cada bloque
+  const W = { energy: 0.35, compute: 0.30, demand: 0.35 };
+
+  // Recoger solo los bloques con dato válido y renormalizar pesos
+  const parts = [];
+  if (c.energy_score  != null) parts.push({ v: +c.energy_score,  w: W.energy });
+  if (c.compute_score != null) parts.push({ v: +c.compute_score, w: W.compute });
+  if (c.demand_score  != null) parts.push({ v: +c.demand_score,  w: W.demand });
+
+  if (!parts.length) {
+    scoreEl.textContent = '—';
+    phaseEl.textContent = 'Sin datos suficientes';
+    phaseEl.style.color = 'var(--muted)';
+    return;
+  }
+
+  const totalW = parts.reduce((a, p) => a + p.w, 0);
+  const score  = Math.round(parts.reduce((a, p) => a + p.v * p.w, 0) / totalW);
+
+  scoreEl.textContent = score;
+  barEl.style.width = score + '%';
+
   let phase, color;
-  if (score >= 80)      { phase = 'EXPANSIÓN FUERTE';   color = 'var(--green)'; }
-  else if (score >= 60) { phase = 'EXPANSIÓN MODERADA'; color = 'var(--yellow)'; }
-  else if (score >= 40) { phase = 'DESACELERACIÓN';     color = 'var(--red)'; }
-  else                  { phase = 'CONTRACCIÓN';         color = 'var(--red)'; }
-  document.getElementById('cyclePhase').textContent = phase;
-  document.getElementById('cyclePhase').style.color = color;
-  document.getElementById('cycleScore').style.color = color;
+  if (score >= 75)      { phase = 'EXPANSIÓN FUERTE';   color = 'var(--green)'; }
+  else if (score >= 55) { phase = 'EXPANSIÓN MODERADA'; color = 'var(--yellow)'; }
+  else if (score >= 40) { phase = 'EQUILIBRIO';          color = 'var(--yellow)'; }
+  else if (score >= 25) { phase = 'DESACELERACIÓN';     color = 'var(--red)'; }
+  else                  { phase = 'EXCESO / CONTRACCIÓN'; color = 'var(--red)'; }
+
+  phaseEl.textContent = phase;
+  phaseEl.style.color = color;
+  scoreEl.style.color = color;
+
+  // Actualizar el desglose visual si existe el contenedor
+  const bd = document.getElementById('cycleBreakdown');
+  if (bd) {
+    const row = (label, v, reason) => {
+      if (v == null) return `<div class="cb-row"><span class="cb-label">${label}</span><span class="cb-val muted">N/D</span></div>`;
+      const col = v >= 60 ? 'var(--green)' : v >= 40 ? 'var(--yellow)' : 'var(--red)';
+      return `<div class="cb-row">
+        <span class="cb-label">${label}</span>
+        <div class="cb-bar-wrap"><div class="cb-bar" style="width:${v}%;background:${col}"></div></div>
+        <span class="cb-val" style="color:${col}">${v}</span>
+        <span class="cb-reason">${reason || ''}</span>
+      </div>`;
+    };
+    bd.innerHTML =
+      row('Energía',  c.energy_score,  c.energy_reason) +
+      row('Cómputo',  c.compute_score, c.compute_reason) +
+      row('Demanda',  c.demand_score,  c.demand_reason);
+  }
 }
 
 // ============================================================
@@ -741,6 +823,9 @@ async function fetchAIData() {
     dcDiv.innerHTML  = renderDC(parsed.datacenter || {});
     pjmDiv.innerHTML = renderPJM(parsed.pjm || {});
 
+    // Actualizar el Cycle Score con la evaluación de Claude
+    if (parsed.cycle) computeCycleScore(parsed.cycle);
+
     const now = new Date().toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' });
     statusBar.innerHTML = `
       <div class="ai-status-icon">✅</div>
@@ -783,19 +868,14 @@ async function fetchAll() {
   btn.textContent = '↻ Actualizando...';
   updateTime();
   renderSignals();
-  try {
-    const [stockResult] = await Promise.allSettled([
-      fetchStocks(),
-      fetchElectricity(),
-      fetchAIData(),        // ← nueva llamada automática a Claude
-    ]);
-    const sd = stockResult.status === 'fulfilled' ? stockResult.value : [];
-    computeCycleScore(sd);
-    showToast('✓ Dashboard actualizado');
-  } catch(e) {
-    showToast('⚠ Algunos datos no se cargaron', true);
-    computeCycleScore([]);
-  }
+  // El Cycle Score ahora lo calcula fetchAIData con la evaluación de Claude
+  // (energía / cómputo / demanda). Las acciones son solo informativas.
+  await Promise.allSettled([
+    fetchStocks(),
+    fetchElectricity(),
+    fetchAIData(),
+  ]);
+  showToast('✓ Dashboard actualizado');
   btn.disabled = false;
   btn.textContent = '↻ Actualizar';
 }
