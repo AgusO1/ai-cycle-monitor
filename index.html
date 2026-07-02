@@ -511,6 +511,779 @@ function computeCycleScore(stockData) {
 }
 
 // ============================================================
+// ELECTRICITY — vía Netlify Function
+// ============================================================
+async function fetchElectricity() {
+  const countries = [
+    { code: 'de', name: '🇩🇪 Alemania' },
+    { code: 'fr', name: '🇫🇷 Francia'  },
+    { code: 'es', name: '🇪🇸 España'   },
+    { code: 'nl', name: '🇳🇱 Holanda'  },
+  ];
+
+  const container = document.getElementById('elecCards');
+  const badge     = document.getElementById('elecBadge');
+
+  container.innerHTML = countries.map(() =>
+    `<div class="card"><div class="card-lbl"><span class="live-dot warn-dot"></span>Cargando...</div><div class="card-val muted"><span class="spin"></span></div></div>`
+  ).join('');
+
+  const results = await Promise.allSettled(
+    countries.map(c =>
+      fetch(`/.netlify/functions/data?type=electricity&country=${c.code}`, { signal: AbortSignal.timeout(14000) })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    )
+  );
+
+  let html = '', liveCount = 0;
+  const sources = new Set();
+
+  results.forEach((r, i) => {
+    const c = countries[i];
+    const v = r.status === 'fulfilled' ? r.value : null;
+    if (v?.prices?.length) {
+      const norm    = v.prices.map(p => p / 10);
+      const latest  = norm[norm.length - 1];
+      const avg     = norm.reduce((a, b) => a + b, 0) / norm.length;
+      const diff    = latest - avg;
+      const diffPct = avg !== 0 ? (diff / avg * 100) : 0;
+      const cls     = latest > avg*1.2 ? 'down' : latest < avg*0.8 ? 'up' : 'warn';
+      const maxP    = Math.max(...norm) || 1;
+      const spark   = norm.slice(-12).map(p => {
+        const h   = Math.max(4, (p / maxP) * 28);
+        const col = p > avg * 1.2 ? 'var(--red)' : 'var(--green)';
+        return `<div class="spark-bar" style="height:${h}px;background:${col}"></div>`;
+      }).join('');
+      sources.add(v.source || 'API');
+      liveCount++;
+      html += `
+        <div class="card ${diff>0?'accent-yellow':'accent-green'}">
+          <div class="card-lbl"><span class="live-dot"></span>${c.name}</div>
+          <div class="card-val ${cls}">${fmt(latest,2)}<span style="font-size:13px;font-weight:400;color:var(--muted)"> c€/kWh</span></div>
+          <div class="card-delta ${diff>0?'down':'up'}">${diff>0?'▲':'▼'} ${fmt(Math.abs(diffPct),1)}% vs media hoy</div>
+          <div class="spark">${spark}</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:6px;font-family:'JetBrains Mono',monospace">${v.source||'—'}</div>
+        </div>`;
+    } else {
+      html += `
+        <div class="card">
+          <div class="card-lbl"><span class="live-dot dead-dot"></span>${c.name}</div>
+          <div class="card-val muted">N/D</div>
+          <div class="card-sub" style="font-size:10px">No disponible ahora</div>
+        </div>`;
+    }
+  });
+
+  container.innerHTML = html;
+
+  if (liveCount === 0) {
+    badge.innerHTML = '⚠ Sin datos — todas las fuentes fallaron';
+    badge.className = 'badge badge-err';
+  } else if (liveCount < countries.length) {
+    badge.innerHTML = `⚡ Parcial · ${liveCount}/4 · ${[...sources].join(', ')}`;
+    badge.className = 'badge badge-q';
+  } else {
+    badge.innerHTML = `<span class="live-dot"></span>En vivo · ${[...sources].join(' + ')}`;
+    badge.className = 'badge badge-live';
+  }
+}
+
+// ============================================================
+// STOCKS — vía Netlify Function
+// ============================================================
+async function fetchStocks() {
+  const tbody = document.getElementById('stockBody');
+  const badge = document.getElementById('stockBadge');
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:1.5rem;color:var(--muted)"><span class="spin"></span> Cargando...</td></tr>';
+
+  const tickers = STOCKS.map(s => s.ticker).join(',');
+
+  try {
+    const res = await fetch(`/.netlify/functions/data?type=stocks&tickers=${tickers}`, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const quotes = data.quotes || [];
+    if (!quotes.length) throw new Error('Sin quotes');
+
+    const quoteMap = {};
+    quotes.forEach(q => quoteMap[q.symbol] = q);
+    const stockData = [];
+    let html = '';
+
+    STOCKS.forEach(s => {
+      const q = quoteMap[s.ticker];
+      if (!q) { html += `<tr><td class="mono">${s.ticker}</td><td>${s.name}</td><td colspan="3" style="color:var(--muted);text-align:center">N/D</td></tr>`; return; }
+      const price = q.regularMarketPrice;
+      const changePct = q.regularMarketChangePercent || 0;
+      const currency = q.currency || 'USD';
+      stockData.push({ ticker: s.ticker, change: changePct });
+      const chClass = changePct >= 0 ? 'up' : 'down';
+      const chSign  = changePct >= 0 ? '▲' : '▼';
+      let signal = '→ Neutral', sigClass = 'muted';
+      if (changePct > 3)       { signal = '🚀 Fuerte subida'; sigClass = 'up'; }
+      else if (changePct > 1)  { signal = '↑ Subida';         sigClass = 'up'; }
+      else if (changePct > -1) { signal = '→ Neutral';        sigClass = 'muted'; }
+      else if (changePct > -3) { signal = '↓ Bajada';         sigClass = 'down'; }
+      else                     { signal = '⚠ Caída fuerte';   sigClass = 'down'; }
+      html += `<tr>
+        <td class="mono" style="color:var(--blue)">${s.ticker}</td>
+        <td><span style="font-weight:500">${s.name}</span><br><span style="font-size:10px;color:var(--muted)">${s.sector}</span></td>
+        <td class="mono" style="text-align:right">${fmt(price)} ${currency}</td>
+        <td class="mono ${chClass}" style="text-align:right">${chSign} ${fmt(Math.abs(changePct),2)}%</td>
+        <td style="text-align:right"><span class="${sigClass}" style="font-size:11px">${signal}</span></td>
+      </tr>`;
+    });
+
+    tbody.innerHTML = html;
+    badge.innerHTML = `<span class="live-dot"></span>${data.source || 'Yahoo Finance'} · Tiempo real`;
+    badge.className = 'badge badge-live';
+    return stockData;
+
+  } catch(e) {
+    console.warn('Stocks error:', e.message);
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:1rem;color:var(--muted)">No disponible ahora. <a href="https://finance.yahoo.com" target="_blank" style="color:var(--blue)">Ver en Yahoo →</a></td></tr>`;
+    badge.innerHTML = '⚠ Sin datos'; badge.className = 'badge badge-err';
+    return [];
+  }
+}
+
+// ============================================================
+// CLAUDE API — directo desde el navegador con API key local
+// ============================================================
+function renderGPU(g) {
+  const gpuItems = [
+    { label: 'B200 SXM5 192GB', data: g.b200, color: 'var(--green)' },
+    { label: 'H200 SXM5 141GB', data: g.h200, color: 'var(--blue)' },
+    { label: 'H100 SXM5  80GB', data: g.h100, color: 'var(--yellow)' },
+    { label: 'A100 SXM4  80GB', data: g.a100, color: 'var(--muted)' },
+  ];
+  return gpuItems.map(item => `
+    <div class="gpu-ai-card">
+      <span class="gpu-ai-name">${item.label}</span>
+      <div style="text-align:right">
+        <div class="gpu-ai-price" style="color:${item.color}">
+          ${item.data?.price != null ? '$' + Number(item.data.price).toFixed(2) + '/hr' : 'N/D'}
+        </div>
+        <div class="gpu-ai-trend">${item.data?.trend || '—'}</div>
+      </div>
+    </div>`).join('') +
+    `<div style="font-size:9px;color:var(--muted);margin-top:6px;font-family:'JetBrains Mono',monospace">${g.source||'—'} · ${g.date||'—'}</div>`;
+}
+
+function renderDC(dc) {
+  return `
+    <div class="dc-metric"><div class="dc-metric-label">Vacancia N. Virginia</div>
+    <div class="dc-metric-val ${dc.vacancy_nova&&dc.vacancy_nova!=='N/D'?'up':'muted'}">${dc.vacancy_nova||'N/D'}</div></div>
+    <div class="dc-metric"><div class="dc-metric-label">En construcción (EEUU)</div>
+    <div class="dc-metric-val warn">${dc.under_construction_mw!=null?dc.under_construction_mw.toLocaleString()+' MW':'N/D'}</div></div>
+    <div class="dc-metric"><div class="dc-metric-label">Absorción trimestral</div>
+    <div class="dc-metric-val neu">${dc.absorption_q||'N/D'}</div></div>
+    <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:'JetBrains Mono',monospace">${dc.source||'—'} · ${dc.date||'—'}</div>`;
+}
+
+function renderPJM(pjm) {
+  return `
+    <div class="pjm-stat"><span class="pjm-stat-label">Precio capacidad DOM</span><span class="pjm-stat-val warn">${pjm.dom_capacity_price||'N/D'}</span></div>
+    <div class="pjm-stat"><span class="pjm-stat-label">Capacidad disponible</span><span class="pjm-stat-val ${pjm.available_capacity_gw?'up':'muted'}">${pjm.available_capacity_gw!=null?pjm.available_capacity_gw+' GW':'N/D'}</span></div>
+    <div class="pjm-stat"><span class="pjm-stat-label">Nueva capacidad ETA</span><span class="pjm-stat-val down">${pjm.new_capacity_eta||'N/D'}</span></div>
+    <div class="pjm-stat"><span class="pjm-stat-label">Previsión demanda</span><span class="pjm-stat-val neu">${pjm.load_forecast_gw!=null?pjm.load_forecast_gw+' GW':'N/D'}</span></div>
+    <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:'JetBrains Mono',monospace">${pjm.source||'—'} · ${pjm.date||'—'}</div>`;
+}
+
+function showStaticFallback(reason) {
+  const gpuDiv = document.getElementById('gpuAiContent');
+  const dcDiv  = document.getElementById('dcAiContent');
+  const pjmDiv = document.getElementById('pjmAiContent');
+  const statusBar = document.getElementById('aiStatusBar');
+  const badge = document.getElementById('aiBadge');
+
+  const fallbackGPU = { b200:{price:8.40,trend:'+demanda alta'}, h200:{price:5.82,trend:'→ estable'}, h100:{price:4.06,trend:'↓ -18% vs pico'}, a100:{price:2.21,trend:'↓ legacy'}, source:'Datos de referencia Jun 2026', date:'Jun 2026' };
+  gpuDiv.innerHTML = renderGPU(fallbackGPU) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
+  dcDiv.innerHTML  = renderDC({ vacancy_nova:'~1-2%', under_construction_mw:5000, absorption_q:'Récord Q1 2026', source:'CBRE referencia', date:'Q1 2026' }) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
+  pjmDiv.innerHTML = renderPJM({ dom_capacity_price:'+833% vs 2024', available_capacity_gw:null, new_capacity_eta:'2027+', load_forecast_gw:null, source:'PJM referencia', date:'2026' }) + `<div style="font-size:9px;color:var(--yellow);margin-top:4px;font-family:'JetBrains Mono',monospace">⚠ Referencia estática</div>`;
+
+  statusBar.innerHTML = `
+    <div class="ai-status-icon">⚠️</div>
+    <div style="flex:1">
+      <div class="ai-status-text" style="color:var(--yellow)">${reason}</div>
+      <div class="ai-timestamp">Reintentará en el próximo refresco automático</div>
+    </div>`;
+  statusBar.style.borderColor = 'rgba(255,184,0,0.3)';
+  statusBar.style.background  = 'rgba(255,184,0,0.04)';
+  badge.innerHTML = '⚠ Datos estáticos';
+  badge.className = 'badge badge-q';
+}
+
+async function fetchAIData() {
+  const statusBar = document.getElementById('aiStatusBar');
+  const badge     = document.getElementById('aiBadge');
+  const gpuDiv    = document.getElementById('gpuAiContent');
+  const dcDiv     = document.getElementById('dcAiContent');
+  const pjmDiv    = document.getElementById('pjmAiContent');
+
+  try {
+    statusBar.innerHTML = `
+      <div class="ai-status-icon">🤖</div>
+      <div><div class="ai-status-text"><strong>Claude</strong> buscando datos actualizados...</div>
+      <div class="ai-timestamp">Conectando con la función de Netlify...</div></div>
+      <span class="spin spin-purple"></span>`;
+
+    const res = await fetch('/.netlify/functions/data?type=ai', {
+      signal: AbortSignal.timeout(58000),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'HTTP ' + res.status);
+    }
+
+    const parsed = await res.json();
+
+    gpuDiv.innerHTML = renderGPU(parsed.gpu || {});
+    dcDiv.innerHTML  = renderDC(parsed.datacenter || {});
+    pjmDiv.innerHTML = renderPJM(parsed.pjm || {});
+
+    const now = new Date().toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' });
+    statusBar.innerHTML = `
+      <div class="ai-status-icon">✅</div>
+      <div>
+        <div class="ai-status-text"><strong>Claude</strong> actualizó los datos con búsqueda web en tiempo real</div>
+        <div class="ai-timestamp">Última búsqueda: ${now} · Spheron, CBRE, PJM</div>
+      </div>`;
+    statusBar.style.borderColor = 'rgba(0,212,138,0.3)';
+    statusBar.style.background  = 'rgba(0,212,138,0.04)';
+    badge.innerHTML = '<span class="live-dot"></span>Claude · Actualizado';
+    badge.className = 'badge badge-live';
+    showToast('✓ Datos IA actualizados');
+
+  } catch(err) {
+    console.error('AI fetch error:', err);
+    showStaticFallback('Error: ' + err.message);
+  }
+}
+
+// ============================================================
+// SEÑALES ESTÁTICAS
+// ============================================================
+function renderSignals() {
+  document.getElementById('bullSignals').innerHTML = BULL_SIGNALS.map(s =>
+    `<div style="font-size:12px;padding:4px 0;border-bottom:1px solid var(--border);display:flex;gap:8px">
+      <span class="up" style="flex-shrink:0">●</span><span>${s}</span></div>`
+  ).join('');
+  document.getElementById('bearSignals').innerHTML = BEAR_SIGNALS.map((s,i) =>
+    `<div style="font-size:12px;padding:4px 0;border-bottom:${i<BEAR_SIGNALS.length-1?'1px solid var(--border)':'none'};display:flex;gap:8px">
+      <span class="${i<2?'down':'warn'}" style="flex-shrink:0">●</span><span>${s}</span></div>`
+  ).join('');
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+async function fetchAll() {
+  const btn = document.getElementById('btnRefresh');
+  btn.disabled = true;
+  btn.textContent = '↻ Actualizando...';
+  updateTime();
+  renderSignals();
+  try {
+    const [stockResult] = await Promise.allSettled([
+      fetchStocks(),
+      fetchElectricity(),
+      fetchAIData(),        // ← nueva llamada automática a Claude
+    ]);
+    const sd = stockResult.status === 'fulfilled' ? stockResult.value : [];
+    computeCycleScore(sd);
+    showToast('✓ Dashboard actualizado');
+  } catch(e) {
+    showToast('⚠ Algunos datos no se cargaron', true);
+    computeCycleScore([]);
+  }
+  btn.disabled = false;
+  btn.textContent = '↻ Actualizar';
+}
+
+fetchAll();
+setInterval(fetchAll, 5 * 60 * 1000);
+</script>
+</body>
+</html>
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .brand { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text); }
+  .brand span { color: var(--blue); }
+  .header-meta { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 3px; }
+  .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+  .cycle-widget { display: flex; align-items: center; gap: 10px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; }
+  .cycle-label { font-size: 9px; color: var(--muted); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.1em; }
+  .cycle-score { font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; }
+  .cycle-bar-wrap { width: 80px; }
+  .cycle-bar-bg { height: 4px; background: var(--border); border-radius: 2px; }
+  .cycle-bar-fill { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--green), var(--yellow)); transition: width 1s ease; }
+  .cycle-phase { font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--yellow); margin-top: 2px; }
+
+  .btn-refresh { background: var(--bg3); border: 1px solid var(--border); color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 6px 14px; border-radius: 6px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.08em; transition: all 0.2s; }
+  .btn-refresh:hover { background: var(--blue); color: white; border-color: var(--blue); }
+  .btn-refresh:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .live-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--green); margin-right: 4px; animation: blink 2s infinite; }
+  .warn-dot { background: var(--yellow); }
+  .dead-dot { background: var(--muted); animation: none; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+  .section-row { display: flex; align-items: center; gap: 10px; margin: 1.4rem 0 0.7rem; }
+  .section-row::after { content:''; flex:1; height:1px; background:var(--border); }
+  .section-title { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
+  .badge { font-size: 8px; padding: 2px 7px; border-radius: 3px; font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; white-space: nowrap; }
+  .badge-live { background: rgba(0,212,138,0.15); color: var(--green); }
+  .badge-q    { background: rgba(255,184,0,0.15);  color: var(--yellow); }
+  .badge-est  { background: rgba(78,141,245,0.15);  color: var(--blue); }
+  .badge-err  { background: rgba(255,69,96,0.15);   color: var(--red); }
+  .badge-ai   { background: rgba(168,85,247,0.15);  color: var(--purple); }
+
+  .g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .g4 { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
+
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 0.9rem 1rem; }
+  .card.accent-green  { border-color: rgba(0,212,138,0.3); }
+  .card.accent-yellow { border-color: rgba(255,184,0,0.3); }
+  .card.accent-red    { border-color: rgba(255,69,96,0.3); }
+  .card.accent-blue   { border-color: rgba(78,141,245,0.3); }
+  .card.accent-purple { border-color: rgba(168,85,247,0.3); }
+
+  .card-lbl { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: 'JetBrains Mono', monospace; margin-bottom: 6px; display: flex; align-items: center; gap: 5px; }
+  .card-val { font-family: 'JetBrains Mono', monospace; font-size: 24px; font-weight: 700; line-height: 1; margin-bottom: 3px; }
+  .card-sub { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+  .card-delta { font-size: 11px; font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+
+  .up    { color: var(--green); }
+  .down  { color: var(--red); }
+  .warn  { color: var(--yellow); }
+  .neu   { color: var(--blue); }
+  .muted { color: var(--muted); }
+
+  .sig { border-radius: 8px; border: 1px solid; padding: 0.8rem 1rem; display: flex; align-items: flex-start; gap: 10px; }
+  .sig.green  { border-color: rgba(0,212,138,0.4);  background: rgba(0,212,138,0.04); }
+  .sig.yellow { border-color: rgba(255,184,0,0.4);  background: rgba(255,184,0,0.04); }
+  .sig.red    { border-color: rgba(255,69,96,0.4);  background: rgba(255,69,96,0.04); }
+  .sig-icon  { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .sig-title { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .sig-text  { font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+  .tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .tbl th { font-size: 9px; font-weight: 600; color: var(--muted); text-align: left; padding: 0 8px 7px; border-bottom: 1px solid var(--border); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.08em; }
+  .tbl td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .tbl tr:last-child td { border-bottom: none; }
+  .tbl tr:hover td { background: var(--bg3); }
+  .mono { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+
+  .pb-bg   { height: 4px; background: var(--border); border-radius: 2px; }
+  .pb-fill { height: 4px; border-radius: 2px; transition: width 0.8s ease; }
+
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 28px; margin-top: 8px; }
+  .spark-bar { flex: 1; border-radius: 1px 1px 0 0; min-height: 2px; opacity: 0.8; }
+
+  .energy-row { display: grid; grid-template-columns: 90px 1fr 70px 65px; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .energy-row:last-child { border-bottom: none; }
+  .energy-row.header { font-size: 9px; color: var(--muted); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.08em; padding-bottom: 8px; }
+
+  /* AI DATA SECTION */
+  .ai-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(168,85,247,0.06);
+    border: 1px solid rgba(168,85,247,0.25);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .ai-status-icon { font-size: 16px; }
+  .ai-status-text { flex: 1; color: var(--muted); line-height: 1.5; }
+  .ai-status-text strong { color: var(--purple); }
+  .ai-timestamp { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  .gpu-ai-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .gpu-ai-name { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+  .gpu-ai-price { font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .gpu-ai-trend { font-size: 9px; color: var(--muted); font-family: 'JetBrains Mono', monospace; margin-top: 2px; text-align: right; }
+
+  .dc-metric { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .dc-metric:last-child { border-bottom: none; }
+  .dc-metric-label { font-size: 10px; color: var(--muted); font-family: 'JetBrains Mono', monospace; margin-bottom: 4px; }
+  .dc-metric-val { font-size: 16px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+
+  .pjm-stat { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .pjm-stat:last-child { border-bottom: none; }
+  .pjm-stat-label { color: var(--muted); font-size: 11px; }
+  .pjm-stat-val { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+
+  .footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 10px; color: var(--muted); font-family: 'JetBrains Mono', monospace; line-height: 1.7; }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; }
+  .spin-purple { border-top-color: var(--purple); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font-size: 12px; font-family: 'JetBrains Mono', monospace; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; max-width: 320px; }
+  .toast.show { opacity: 1; }
+
+  @media (max-width: 700px) {
+    body { padding: 1rem; }
+    .g4 { grid-template-columns: 1fr 1fr; }
+    .g3 { grid-template-columns: 1fr 1fr; }
+    .energy-row { grid-template-columns: 70px 1fr 55px; }
+    .energy-row > *:last-child { display: none; }
+  }
+  @media (max-width: 480px) {
+    .g2, .g3, .g4 { grid-template-columns: 1fr; }
+    .header { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div>
+    <div class="brand">AI <span>Cycle</span> Monitor</div>
+    <div class="header-meta" id="lastUpdate">Iniciando...</div>
+  </div>
+  <div class="header-right">
+    <div class="cycle-widget">
+      <div>
+        <div class="cycle-label">Cycle Score</div>
+        <div class="cycle-phase" id="cyclePhase">Calculando...</div>
+      </div>
+      <div>
+        <div class="cycle-score" id="cycleScore">—</div>
+        <div class="cycle-bar-wrap">
+          <div class="cycle-bar-bg"><div class="cycle-bar-fill" id="cycleBar" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <button class="btn-refresh" id="btnRefresh" onclick="fetchAll()">↻ Actualizar</button>
+  </div>
+</div>
+
+<!-- SIGNALS -->
+<div class="g3" id="signals">
+  <div class="sig yellow">
+    <div class="sig-icon">⚡</div>
+    <div>
+      <div class="sig-title warn">Potencia — ESCASEZ</div>
+      <div class="sig-text">Red eléctrica es el cuello de botella #1. Virginia sin capacidad nueva hasta 2027+.</div>
+    </div>
+  </div>
+  <div class="sig green">
+    <div class="sig-icon">🖥️</div>
+    <div>
+      <div class="sig-title up">Compute — DISPONIBLE</div>
+      <div class="sig-text">GPUs H100/H200 accesibles en mercado spot. Precios estables vs pico 2024.</div>
+    </div>
+  </div>
+  <div class="sig green">
+    <div class="sig-icon">📈</div>
+    <div>
+      <div class="sig-title up">Demanda — ACELERANDO</div>
+      <div class="sig-text">Capex hyperscalers $725B en 2026. Agentic AI amplía demanda de inference continuo.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ELECTRICIDAD EN VIVO -->
+<div class="section-row">
+  <span class="section-title">⚡ Precios Electricidad Spot — Europa</span>
+  <span class="badge badge-live" id="elecBadge"><span class="live-dot"></span>En vivo · ENTSO-E</span>
+</div>
+<div class="g4" id="elecCards">
+  <div class="card"><div class="card-lbl"><span class="live-dot warn-dot"></span>Cargando...</div><div class="card-val muted"><span class="spin"></span></div></div>
+  <div class="card"><div class="card-lbl"><span class="live-dot warn-dot"></span>Cargando...</div><div class="card-val muted"><span class="spin"></span></div></div>
+  <div class="card"><div class="card-lbl"><span class="live-dot warn-dot"></span>Cargando...</div><div class="card-val muted"><span class="spin"></span></div></div>
+  <div class="card"><div class="card-lbl"><span class="live-dot warn-dot"></span>Cargando...</div><div class="card-val muted"><span class="spin"></span></div></div>
+</div>
+
+<!-- ACCIONES EN VIVO -->
+<div class="section-row">
+  <span class="section-title">📊 Acciones Clave — Precios en Vivo</span>
+  <span class="badge badge-live" id="stockBadge"><span class="live-dot"></span>Yahoo Finance</span>
+</div>
+<div class="card">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>Ticker</th><th>Empresa</th>
+        <th style="text-align:right">Precio</th>
+        <th style="text-align:right">Hoy</th>
+        <th style="text-align:right">Señal</th>
+      </tr>
+    </thead>
+    <tbody id="stockBody">
+      <tr><td colspan="5" style="text-align:center;padding:1.5rem;color:var(--muted)"><span class="spin"></span> Cargando precios...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECCIÓN AUTOMÁTICA — GPU + DATA CENTER + PJM via Claude API  -->
+<!-- ============================================================ -->
+<div class="section-row">
+  <span class="section-title">🤖 Datos de Mercado — Automáticos via IA</span>
+  <span class="badge badge-ai" id="aiBadge"><span class="live-dot" style="background:var(--purple);animation:blink 2s infinite"></span>Claude · Web Search</span>
+</div>
+
+<!-- Status bar de la búsqueda IA -->
+<div class="ai-status-bar" id="aiStatusBar">
+  <div class="ai-status-icon">🤖</div>
+  <div>
+    <div class="ai-status-text"><strong>Claude</strong> está buscando datos actualizados de GPU pricing, data centers y capacidad eléctrica Virginia...</div>
+    <div class="ai-timestamp" id="aiTimestamp">Iniciando búsqueda...</div>
+  </div>
+  <span class="spin spin-purple"></span>
+</div>
+
+<div class="g3">
+  <!-- GPU PRICING -->
+  <div class="card accent-purple">
+    <div class="card-lbl" style="color:var(--purple)">🖥️ GPU Spot Pricing · Spheron</div>
+    <div id="gpuAiContent">
+      <div style="color:var(--muted);font-size:12px;padding:1rem 0;text-align:center"><span class="spin spin-purple"></span><br><br>Buscando precios...</div>
+    </div>
+  </div>
+
+  <!-- DATA CENTER -->
+  <div class="card accent-blue">
+    <div class="card-lbl" style="color:var(--blue)">🏗️ Data Centers · CBRE / Mercado</div>
+    <div id="dcAiContent">
+      <div style="color:var(--muted);font-size:12px;padding:1rem 0;text-align:center"><span class="spin"></span><br><br>Buscando datos...</div>
+    </div>
+  </div>
+
+  <!-- PJM VIRGINIA -->
+  <div class="card accent-yellow">
+    <div class="card-lbl" style="color:var(--yellow)">⚡ Capacidad Eléctrica · PJM Virginia</div>
+    <div id="pjmAiContent">
+      <div style="color:var(--muted);font-size:12px;padding:1rem 0;text-align:center"><span class="spin warn-dot"></span><br><br>Buscando datos...</div>
+    </div>
+  </div>
+</div>
+
+<!-- HYPERSCALERS CAPEX -->
+<div class="section-row">
+  <span class="section-title">☁️ Capex Hyperscalers — Barómetro Demanda</span>
+  <span class="badge badge-q">Q1 2026 Earnings</span>
+</div>
+<div class="card">
+  <div class="energy-row header">
+    <span>Empresa</span><span>Capex 2026 (est.)</span><span style="text-align:right">Cloud</span><span style="text-align:right">Señal</span>
+  </div>
+  <div class="energy-row">
+    <span style="font-weight:600">Microsoft</span>
+    <div><div class="pb-bg"><div class="pb-fill" style="width:82%;background:var(--blue)"></div></div></div>
+    <span class="mono" style="text-align:right;color:var(--blue)">$80B+</span>
+    <span class="mono up" style="text-align:right;font-size:11px">Azure +39%</span>
+  </div>
+  <div class="energy-row">
+    <span style="font-weight:600">Amazon</span>
+    <div><div class="pb-bg"><div class="pb-fill" style="width:100%;background:var(--yellow)"></div></div></div>
+    <span class="mono warn" style="text-align:right">$105B+</span>
+    <span class="mono up" style="text-align:right;font-size:11px">AWS +28%</span>
+  </div>
+  <div class="energy-row">
+    <span style="font-weight:600">Google</span>
+    <div><div class="pb-bg"><div class="pb-fill" style="width:74%;background:var(--green)"></div></div></div>
+    <span class="mono up" style="text-align:right">$75B+</span>
+    <span class="mono up" style="text-align:right;font-size:11px">GCP +63%</span>
+  </div>
+  <div class="energy-row">
+    <span style="font-weight:600">Meta</span>
+    <div><div class="pb-bg"><div class="pb-fill" style="width:62%;background:var(--purple)"></div></div></div>
+    <span class="mono" style="text-align:right;color:var(--purple)">$65B</span>
+    <span class="mono up" style="text-align:right;font-size:11px">AI +22%</span>
+  </div>
+  <div class="energy-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:10px;border-bottom:none">
+    <span style="font-weight:700">TOTAL</span>
+    <div><div class="pb-bg"><div class="pb-fill" style="width:100%;background:linear-gradient(90deg,var(--blue),var(--green))"></div></div></div>
+    <span class="mono up" style="text-align:right;font-size:16px;font-weight:700">$725B</span>
+    <span class="mono up" style="text-align:right;font-size:11px">↑ Acelerando</span>
+  </div>
+</div>
+
+<!-- SEÑALES -->
+<div class="section-row">
+  <span class="section-title">📡 Panel Señales — Escasez vs Exceso</span>
+  <span class="badge badge-est">Análisis semanal</span>
+</div>
+<div class="g2">
+  <div class="card accent-green">
+    <div class="card-lbl up">● Señales Escasez (alcista para el ciclo)</div>
+    <div id="bullSignals" style="margin-top:6px"></div>
+  </div>
+  <div class="card accent-yellow">
+    <div class="card-lbl warn">● Señales Exceso (bajista para el ciclo)</div>
+    <div id="bearSignals" style="margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- CATALIZADORES -->
+<div class="section-row">
+  <span class="section-title">🗓️ Catalizadores — Próximos 90 días</span>
+</div>
+<div class="g3">
+  <div class="card">
+    <div class="card-lbl">Julio 2026</div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:4px">Earnings Q2 Hyperscalers</div>
+    <div class="card-sub">MSFT, GOOG, META, AMZN. Si capex sube → ciclo acelera. Si baja → corrección extendida.</div>
+  </div>
+  <div class="card">
+    <div class="card-lbl warn">Agosto 2026</div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:4px">Nvidia Q2 FY2027</div>
+    <div class="card-sub">El earnings más relevante del ciclo. Backlog Blackwell y guidance Q3. Si supera $44B → alcista.</div>
+  </div>
+  <div class="card">
+    <div class="card-lbl down">Sept / Oct / Dic 2026</div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:4px">Fed — Subidas de tipos</div>
+    <div class="card-sub">BofA y Deutsche Bank esperan 3 subidas más bajo Warsh. Presiona valuaciones growth.</div>
+  </div>
+</div>
+
+<!-- FUENTES -->
+<div class="section-row">
+  <span class="section-title">🔗 Fuentes de Datos</span>
+</div>
+<div class="g2">
+  <div class="card">
+    <div class="card-lbl up">Datos en vivo (automáticos)</div>
+    <div style="font-size:12px;line-height:2;color:var(--muted)">
+      <div>⚡ <span style="color:var(--text)">ENTSO-E / Energy-Charts</span> — Precios spot electricidad Europa</div>
+      <div>📈 <span style="color:var(--text)">Yahoo Finance API</span> — Precios acciones en tiempo real</div>
+      <div>🤖 <span style="color:var(--purple)">Claude API + Web Search</span> — GPU pricing, data centers, PJM Virginia</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-lbl" style="color:var(--purple)">Datos vía IA (automáticos al cargar)</div>
+    <div style="font-size:12px;line-height:2;color:var(--muted)">
+      <div>🖥️ <span style="color:var(--text)">spheron.network</span> — GPU spot pricing · Búsqueda web automática</div>
+      <div>🏗️ <span style="color:var(--text)">CBRE / DataCenterMap</span> — Vacancy & construcción · Web search</div>
+      <div>⚡ <span style="color:var(--text)">PJM DOM Zone</span> — Capacidad Virginia · Web search en tiempo real</div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <div>AI Cycle Monitor · v2.0 · Datos en vivo: ENTSO-E, Yahoo Finance · Datos IA: Spheron, CBRE, PJM via Claude API</div>
+  <div>⚠️ Solo informativo — no constituye asesoramiento financiero.</div>
+  <div id="footerTime"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================
+// CONFIGURACIÓN
+// ============================================================
+const STOCKS = [
+  { ticker: 'NVDA',  name: 'Nvidia',          sector: 'IA/Chips' },
+  { ticker: 'ASML',  name: 'ASML Holding',    sector: 'Chips EUV' },
+  { ticker: 'AVGO',  name: 'Broadcom',        sector: 'IA/Chips' },
+  { ticker: 'MU',    name: 'Micron',          sector: 'Memoria HBM' },
+  { ticker: 'ANET',  name: 'Arista Networks', sector: 'Redes IA' },
+  { ticker: 'GEV',   name: 'GE Vernova',      sector: 'Energía IA' },
+  { ticker: 'VRT',   name: 'Vertiv',          sector: 'Cooling DC' },
+  { ticker: 'IONQ',  name: 'IonQ',            sector: 'Cuántica' },
+  { ticker: 'NBIS',  name: 'Nebius Group',    sector: 'Neocloud' },
+  { ticker: 'SAN',   name: 'Santander',       sector: 'Europa' },
+  { ticker: 'CCJ',   name: 'Cameco',          sector: 'Uranio' },
+  { ticker: 'DDOG',  name: 'Datadog',         sector: 'Observabilidad' },
+];
+
+const BULL_SIGNALS = [
+  'PJM Virginia: precio capacidad +833% vs 2024',
+  'Vacancia DCs Northern Virginia: ~1-2%',
+  'Blackwell B200: lista espera 6-9 meses',
+  'ASML: backlog 28,035 pedidos en 2025',
+  '700+ data centers en construcción en EE.UU.',
+  'Capex hyperscalers $725B en 2026 — récord',
+];
+
+const BEAR_SIGNALS = [
+  'H100/A100 spot: precios -18-30% vs pico 2024',
+  'Semis corrigieron -5-7% semana 23 jun 2026',
+  'Eficiencia/tarea cayendo: más tokens/watt',
+  'Expectativas earnings Q3 muy elevadas',
+  'Fed: 3 subidas tipos esperadas H2 2026',
+];
+
+// ============================================================
+// UTILITIES
+// ============================================================
+function showToast(msg, isError = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = isError ? 'var(--red)' : 'var(--green)';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 4000);
+}
+
+function fmt(n, decimals = 2) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  return n.toLocaleString('es-ES', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+function updateTime() {
+  const now = new Date();
+  const s = now.toLocaleDateString('es-ES', { weekday:'short', day:'2-digit', month:'short', year:'numeric' })
+           + ' · ' + now.toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' });
+  document.getElementById('lastUpdate').textContent = 'Última actualización: ' + s;
+  document.getElementById('footerTime').textContent = s;
+}
+
+function getToday()     { return new Date().toISOString().split('T')[0]; }
+function getYesterday() { const d = new Date(); d.setDate(d.getDate()-1); return d.toISOString().split('T')[0]; }
+
+// ============================================================
+// CYCLE SCORE
+// ============================================================
+function computeCycleScore(stockData) {
+  let score = 72;
+  if (stockData && stockData.length > 0) {
+    const gains = stockData.filter(s => s.change > 0).length;
+    const pct = gains / stockData.length;
+    if (pct > 0.7) score += 5;
+    else if (pct < 0.4) score -= 8;
+  }
+  score = Math.max(20, Math.min(95, score));
+  document.getElementById('cycleScore').textContent = score;
+  document.getElementById('cycleBar').style.width = score + '%';
+  let phase, color;
+  if (score >= 80)      { phase = 'EXPANSIÓN FUERTE';   color = 'var(--green)'; }
+  else if (score >= 60) { phase = 'EXPANSIÓN MODERADA'; color = 'var(--yellow)'; }
+  else if (score >= 40) { phase = 'DESACELERACIÓN';     color = 'var(--red)'; }
+  else                  { phase = 'CONTRACCIÓN';         color = 'var(--red)'; }
+  document.getElementById('cyclePhase').textContent = phase;
+  document.getElementById('cyclePhase').style.color = color;
+  document.getElementById('cycleScore').style.color = color;
+}
+
+// ============================================================
 // ELECTRICITY — directo a APIs públicas (sin proxy)
 // Cadena: Energy-Charts → REE (España) → corsproxy.io
 // ============================================================
