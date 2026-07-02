@@ -4,11 +4,23 @@
 // ============================================================
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const FMP_KEY = process.env.FMP_API_KEY;
 
 const FETCH_HEADERS = {
   'Accept': 'application/json',
   'User-Agent': 'Mozilla/5.0 (compatible; AI-Cycle-Monitor/2.0)',
 };
+
+// Convierte el formato FMP al formato que espera el dashboard
+function normalizeFMP(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map(q => ({
+    symbol: q.symbol,
+    regularMarketPrice: q.price,
+    regularMarketChangePercent: q.changePercentage != null ? q.changePercentage : (q.changesPercentage != null ? q.changesPercentage : 0),
+    currency: 'USD',
+  }));
+}
 
 exports.handler = async (event) => {
   const cors = {
@@ -23,70 +35,33 @@ exports.handler = async (event) => {
 
   const { type, country } = event.queryStringParameters || {};
 
-  // ── ACCIONES — Yahoo Finance directo desde servidor ──────
+  // ── ACCIONES — Financial Modeling Prep (fiable desde servidor) ──
   if (type === 'stocks') {
     const tickers = (event.queryStringParameters?.tickers || '').trim();
     if (!tickers) {
       return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'Faltan tickers' }) };
     }
-
-    const urls = [
-      `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers}&fields=regularMarketPrice,regularMarketChangePercent,currency`,
-      `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${tickers}&fields=regularMarketPrice,regularMarketChangePercent,currency`,
-    ];
-
-    for (const url of urls) {
-      try {
-        const res = await fetch(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'Accept': 'application/json',
-          },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!res.ok) { console.log(`Yahoo ${url} → ${res.status}`); continue; }
-        const data = await res.json();
-        const quotes = data?.quoteResponse?.result;
-        if (quotes?.length) {
-          return { statusCode: 200, headers: cors, body: JSON.stringify({ quotes, source: 'Yahoo Finance' }) };
-        }
-      } catch (e) {
-        console.error(`Yahoo fetch failed ${url}: ${e.message}`);
-      }
+    if (!FMP_KEY) {
+      return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'FMP_API_KEY no configurada en Netlify → Environment variables' }) };
     }
 
-    // Fallback: Stooq (CSV, sin API key) para tickers US
     try {
-      const symbols = tickers.split(',').map(t => t.trim().toLowerCase() + '.us').join(',');
-      const res = await fetch(`https://stooq.com/q/l/?s=${symbols}&f=sd2t2ohlcv&h&e=csv`, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (res.ok) {
-        const csv = await res.text();
-        const lines = csv.trim().split('\n');
-        const header = lines[0].split(',');
-        const iSym = header.indexOf('Symbol');
-        const iClose = header.indexOf('Close');
-        const iOpen = header.indexOf('Open');
-        const quotes = lines.slice(1).map(line => {
-          const cols = line.split(',');
-          const close = parseFloat(cols[iClose]);
-          const open = parseFloat(cols[iOpen]);
-          const sym = (cols[iSym] || '').replace(/\.US$/i, '').toUpperCase();
-          if (isNaN(close)) return null;
-          const changePct = open ? ((close - open) / open * 100) : 0;
-          return { symbol: sym, regularMarketPrice: close, regularMarketChangePercent: changePct, currency: 'USD' };
-        }).filter(Boolean);
-        if (quotes.length) {
-          return { statusCode: 200, headers: cors, body: JSON.stringify({ quotes, source: 'Stooq' }) };
-        }
+      const url = `https://financialmodelingprep.com/stable/quote?symbol=${tickers}&apikey=${FMP_KEY}`;
+      const res = await fetch(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(12000) });
+      if (!res.ok) {
+        // El endpoint stable admite un símbolo por llamada en el plan free; probamos el batch legacy
+        const urlBatch = `https://financialmodelingprep.com/api/v3/quote/${tickers}?apikey=${FMP_KEY}`;
+        const res2 = await fetch(urlBatch, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(12000) });
+        if (!res2.ok) throw new Error('FMP HTTP ' + res2.status);
+        const arr2 = await res2.json();
+        return { statusCode: 200, headers: cors, body: JSON.stringify({ quotes: normalizeFMP(arr2), source: 'Financial Modeling Prep' }) };
       }
+      const arr = await res.json();
+      return { statusCode: 200, headers: cors, body: JSON.stringify({ quotes: normalizeFMP(arr), source: 'Financial Modeling Prep' }) };
     } catch (e) {
-      console.error('Stooq fallback failed:', e.message);
+      console.error('FMP fetch failed:', e.message);
+      return { statusCode: 503, headers: cors, body: JSON.stringify({ error: 'Sin datos de acciones: ' + e.message }) };
     }
-
-    return { statusCode: 503, headers: cors, body: JSON.stringify({ error: 'Sin datos de acciones' }) };
   }
 
   // ── ELECTRICIDAD ──────────────────────────────────────────
